@@ -22,13 +22,33 @@ The project focuses on reproducible measurements rather than theoretical compari
 | Python | 3.12 |
 | NVIDIA Driver | 610.88 |
 | NVIDIA-SMI | 580.196.07 |
-| CUDA Toolkit | 13.4 (V13.4.92) |
+| Host CUDA Toolkit | 13.4 (V13.4.92) |
 | Driver-reported CUDA | 13.3 |
 | vLLM | 0.33.0rc1.dev321+g6d0189348.d20261101.cu134 |
 | TensorRT-LLM | 1.4.0rc2.dev202610270008 |
-| SGLang | Docker image: lmsysorg/sglang:latest |
+| SGLang | 0.5.23 |
+| SGLang PyTorch | 2.14.1+cu130 |
+| SGLang PyTorch CUDA | 13.0 |
 
-**Version note:** vLLM and TensorRT-LLM are development/release-candidate builds. The exact SGLang, PyTorch and CUDA runtime versions should be recorded from the container used for benchmarking. The Docker `latest` tag is mutable, so the image digest should also be preserved.
+**Version note:** vLLM and TensorRT-LLM are development/release-candidate builds. SGLang runs inside a Docker container. Its PyTorch CUDA build version (13.0) is distinct from the host CUDA Toolkit version (13.4).
+
+**SGLang Docker image:**
+
+text
+
+```text
+lmsysorg/sglang:latest
+```
+
+The immutable image identity was recorded to preserve reproducibility:
+
+text
+
+```text
+lmsysorg/sglang@sha256:f832b5c39559c9caa900b22ad37c76fcce66470676855c42052102c537812f1f
+```
+
+The original deployment used the mutable `latest` tag. The recorded digest identifies the exact image used in the experiment.
 
 ## Benchmark Scope
 
@@ -70,7 +90,7 @@ Each engine uses its own serving configuration and runtime optimizations.
 | --- | --- | --- |
 | vLLM | Linux environment | vLLM serving runtime |
 | TensorRT-LLM | Kubernetes pod | TensorRT-LLM serving runtime |
-| SGLang | Docker container | FlashInfer, FP8 KV cache, RadixCache disabled |
+| SGLang | Docker container | FlashInfer attention backend, FP8 KV cache, static memory fraction 0.85, RadixCache disabled |
 
 The benchmark workload and client are kept consistent. Engine-specific runtime configurations are documented in their respective reports.
 
@@ -109,9 +129,9 @@ llm-inference-benchmarks/
 
 ## Benchmark Results: Three-Engine Comparison
 
-The following table compares the steady-state averages from Runs 2–4 for all three inference engines.
+The following table compares steady-state averages from Runs 2–4 for all three inference engines.
 
-Run 1 is retained in the individual reports but excluded from the comparison because it represents the initial warm-up execution.
+Run 1 is retained in the individual reports but excluded from the steady-state comparison according to the experiment's reporting methodology. It represents the first measured execution, rather than a separate unmeasured warm-up request.
 
 ### Steady-State Performance
 
@@ -127,7 +147,7 @@ Run 1 is retained in the individual reports but excluded from the comparison bec
 | P99 TPOT (ms) | **9.45** | 9.62 | 38.79 |
 | Mean ITL (ms) | **9.28** | 9.51 | 32.24 |
 | Median ITL (ms) | **9.25** | 9.51 | 20.65 |
-| P99 ITL (ms) | **16.10** | 10.33 | 173.89 |
+| P99 ITL (ms) | 16.10 | **10.33** | 173.89 |
 
 _Throughput is measured in generated output tokens per second. Latency values are in milliseconds. Bold indicates the best measured value for each metric._
 
@@ -138,31 +158,33 @@ The three inference engines demonstrated different performance characteristics u
 **SGLang**
 
 - Highest steady-state output throughput at 959.03 tok/s.
-- Approximately 20.7% higher output throughput than vLLM.
+- Approximately 20.42% higher output throughput than vLLM.
+- Approximately 21.59% higher output throughput than TensorRT-LLM.
 - Substantially lower mean TTFT at 144.24 ms.
 - Higher decode latency, with mean TPOT of 32.24 ms.
-- High GPU memory consumption, reaching 16,008 MiB during monitoring.
+- Highest observed GPU memory consumption, reaching 16,008 MiB out of 16,311 MiB during monitoring.
 
 **vLLM**
 
 - Output throughput of 796.39 tok/s.
 - Lowest mean TPOT at 9.28 ms.
 - Lowest median and P99 TPOT among the three engines.
-- Relatively consistent steady-state performance across Runs 2–4.
+- Relatively consistent steady-state output throughput across Runs 2–4.
 
 **TensorRT-LLM**
 
 - Output throughput of 788.74 tok/s.
 - Mean TTFT of 3880.65 ms.
 - Mean TPOT of 9.51 ms.
-- Performance very similar to vLLM under the tested configuration.
+- Performance close to vLLM under the tested configuration.
+- Lowest P99 ITL at 10.33 ms.
 
 ### Key Findings
 
 1. SGLang achieved the highest aggregate output throughput and lowest measured TTFT.
-2. vLLM achieved the lowest decode latency.
-3. TensorRT-LLM delivered performance close to vLLM, without a substantial throughput advantage.
-4. SGLang showed a different balance between prefill/first-token latency and decode latency.
+2. vLLM achieved the lowest mean, median and P99 TPOT.
+3. TensorRT-LLM delivered throughput and decode latency close to vLLM.
+4. SGLang demonstrated a different performance profile, combining high aggregate throughput and low TTFT with higher measured per-token decode latency.
 5. GPU memory consumption is an important constraint, particularly for SGLang on the RTX 5060 Ti 16GB.
 
 **Overall conclusion:** No single engine is best across every performance metric. SGLang leads in aggregate throughput and TTFT, while vLLM leads in decode latency. TensorRT-LLM performs similarly to vLLM in this particular experiment.
@@ -180,7 +202,7 @@ All three engines were evaluated using:
 - OpenAI-compatible serving endpoints.
 - Four benchmark executions per engine.
 - Runs 2–4 for steady-state performance comparisons.
-- Run 1 retained as the initial warm-up execution.
+- Run 1 retained in the reports as the first measured execution.
 - GPU utilization and memory observations where available.
 
 The benchmark uses synthetic random prompts. Results should therefore be interpreted as controlled systems-performance measurements rather than representative measurements of every production workload.
