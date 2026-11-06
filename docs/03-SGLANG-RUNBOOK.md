@@ -76,25 +76,6 @@ docker exec sglang-bench-server python3 -c \
 
 Record the exact Docker image digest and SGLang version. The `latest` tag is mutable, so it should not be used as the only version identifier in the final report.
 
-## 3\. SGLang Server Configuration
-
-The SGLang server is configured through command-line arguments.
-
-Initial configuration:
-
-bash
-
-```bash
-python3 -m sglang.launch_server \
-  --model-path /root/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306 \
-  --host 0.0.0.0 \
-  --port 30000 \
-  --trust-remote-code \
-  --kv-cache-dtype fp8_e4m3 \
-  --mem-fraction-static 0.85 \
-  --attention-backend flashinfer \
-  --disable-radix-cache
-```
 
 ### Configuration parameters
 
@@ -122,8 +103,9 @@ The server is launched using Docker:
 bash
 
 ```bash
-docker run -d \
-  --name sglang-bench-server \
+HF_CACHE_DIR="/home/rtx5060/.cache/huggingface"
+
+docker run -d --name sglang-bench-server \
   --gpus all \
   --shm-size 32g \
   -p 30000:30000 \
@@ -135,7 +117,8 @@ docker run -d \
     --host 0.0.0.0 \
     --port 30000 \
     --trust-remote-code \
-    --kv-cache-dtype fp8_e4m3 \
+    --context-length 2048 \
+    --max-running-requests 8 \
     --mem-fraction-static 0.85 \
     --attention-backend flashinfer \
     --disable-radix-cache

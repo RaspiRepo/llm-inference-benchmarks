@@ -1,4 +1,4 @@
-# SGLang Benchmark Report
+# SGLang Benchmark Report EXP-003-A
 
 ## 1. Executive Summary
 
@@ -130,7 +130,8 @@ docker run -d --name sglang-bench-server \
     --host 0.0.0.0 \
     --port 30000 \
     --trust-remote-code \
-    --kv-cache-dtype fp8_e4m3 \
+    --context-length 2048 \
+    --max-running-requests 8 \
     --mem-fraction-static 0.85 \
     --attention-backend flashinfer \
     --disable-radix-cache
