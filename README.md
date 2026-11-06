@@ -1,10 +1,16 @@
 # LLM Inference Performance Benchmarks
 
-**vLLM vs NVIDIA TensorRT-LLM | RTX 5060 Ti 16GB | Inference Optimization**
+**vLLM vs NVIDIA TensorRT-LLM vs SGLang | RTX 5060 Ti 16GB | Inference Performance**
 
-A practical benchmarking project evaluating LLM inference performance across two popular serving engines: **vLLM** and **NVIDIA TensorRT-LLM**.
+A practical benchmarking project evaluating LLM inference performance across three popular inference engines:
 
-The objective is to understand how inference engine architecture, attention backends, memory management, and runtime optimization affect LLM serving performance on consumer NVIDIA GPU hardware.
+- **vLLM**
+- **NVIDIA TensorRT-LLM**
+- **SGLang**
+
+The objective is to understand how inference engine architecture, attention backends, memory management, scheduling and runtime optimization affect LLM serving performance on consumer NVIDIA GPU hardware.
+
+The project focuses on reproducible measurements rather than theoretical comparisons.
 
 ## Hardware Environment
 
@@ -20,12 +26,13 @@ The objective is to understand how inference engine architecture, attention back
 | Driver-reported CUDA | 13.3 |
 | vLLM | 0.33.0rc1.dev321+g6d0189348.d20261101.cu134 |
 | TensorRT-LLM | 1.4.0rc2.dev202610270008 |
+| SGLang | Docker image: lmsysorg/sglang:latest |
 
-Version note: Both frameworks are development/release-candidate builds, not stable releases.
+**Version note:** vLLM and TensorRT-LLM are development/release-candidate builds. The exact SGLang, PyTorch and CUDA runtime versions should be recorded from the container used for benchmarking. The Docker `latest` tag is mutable, so the image digest should also be preserved.
 
 ## Benchmark Scope
 
-The project evaluates both inference engines using a common model and controlled workloads.
+The project evaluates three inference engines using a common model and controlled synthetic workload.
 
 Metrics include:
 
@@ -41,15 +48,31 @@ Metrics include:
 
 **Qwen2.5-1.5B-Instruct**
 
-Both engines use the same model and standardized synthetic workload:
+All three engines were evaluated using the same model and benchmark workload.
 
 | Parameter | Value |
 | --- | --- |
+| Model | Qwen2.5-1.5B-Instruct |
 | Input length | 1,024 tokens |
 | Output length | 256 tokens |
 | Number of prompts | 100 |
 | Request rate | 5 RPS |
 | Benchmark runs | 4 per engine |
+| Benchmark client | vLLM `bench serve` |
+| Backend | OpenAI-compatible API |
+| Dataset | Random synthetic |
+
+### Experimental Configuration
+
+Each engine uses its own serving configuration and runtime optimizations.
+
+| Engine | Deployment | Notable configuration |
+| --- | --- | --- |
+| vLLM | Linux environment | vLLM serving runtime |
+| TensorRT-LLM | Kubernetes pod | TensorRT-LLM serving runtime |
+| SGLang | Docker container | FlashInfer, FP8 KV cache, RadixCache disabled |
+
+The benchmark workload and client are kept consistent. Engine-specific runtime configurations are documented in their respective reports.
 
 ## Repository Structure
 
@@ -60,10 +83,12 @@ llm-inference-benchmarks/
 ├── README.md
 ├── docs/
 │   ├── 1-vLLM-RUNBOOK.md
-│   └── 2-TRTLLM-RUNBOOK.md
+│   ├── 2-TRTLLM-RUNBOOK.md
+│   └── 3-SGLANG-RUNBOOK.md
 └── reports/
     ├── 01-vllm-baseline.md
-    └── 02-tensorrt-llm.md
+    ├── 02-tensorrt-llm.md
+    └── 03-sglang-baseline.md
 ```
 
 ## Documentation & Runbooks
@@ -71,7 +96,8 @@ llm-inference-benchmarks/
 | Document | Description |
 | --- | --- |
 | vLLM Runbook | vLLM server configuration, startup and benchmark execution |
-| TensorRT-LLM Runbook | TensorRT-LLM configuration, startup and benchmark execution |
+| TensorRT-LLM Runbook | TensorRT-LLM deployment, configuration and benchmark execution |
+| SGLang Runbook | SGLang Docker deployment, server configuration and benchmark execution |
 
 ## Experimental Reports
 
@@ -79,57 +105,117 @@ llm-inference-benchmarks/
 | --- | --- | --- |
 | 01 - vLLM Baseline | Four benchmark runs, metrics and baseline analysis | Completed |
 | 02 - TensorRT-LLM Baseline | Four benchmark runs, metrics and comparison with vLLM | Completed |
+| 03 - SGLang Baseline | Four benchmark runs, metrics and performance analysis | Completed |
 
-## Benchmark Results: vLLM vs TensorRT-LLM
+## Benchmark Results: Three-Engine Comparison
 
-The following table compares the steady-state averages from Runs 2–4 for each engine. Run 1 is retained in the individual reports but excluded from this comparison because it showed lower initial performance.
+The following table compares the steady-state averages from Runs 2–4 for all three inference engines.
 
-| Metric | vLLM | TensorRT-LLM |
-| --- | --- | --- |
-| Output throughput (tokens/sec) | 796.39 | 788.74 |
-| Request throughput (req/s) | 3.11 | 3.08 |
-| Mean TTFT (ms) | 3,889.63 | 3,880.65 |
-| Mean TPOT (ms) | 9.28 | 9.513 |
-| P99 TTFT (ms) | 10,000.87 | 10,094.34 |
+Run 1 is retained in the individual reports but excluded from the comparison because it represents the initial warm-up execution.
 
-### Summary
+### Steady-State Performance
 
-Both inference engines delivered remarkably similar steady-state performance on the RTX 5060 Ti 16GB.
+| Metric | vLLM | TensorRT-LLM | SGLang |
+| --- | --- | --- | --- |
+| Output throughput (tok/s) | 796.39 | 788.74 | **959.03** |
+| Request throughput (req/s) | 3.11 | 3.08 | **3.75** |
+| Mean TTFT (ms) | 3889.63 | 3880.65 | **144.24** |
+| Median TTFT (ms) | 3358.54 | 3500.30 | **123.57** |
+| P99 TTFT (ms) | 10000.01 | 10094.34 | **286.79** |
+| Mean TPOT (ms) | **9.28** | 9.51 | 32.24 |
+| Median TPOT (ms) | **9.30** | 9.55 | 33.54 |
+| P99 TPOT (ms) | **9.45** | 9.62 | 38.79 |
+| Mean ITL (ms) | **9.28** | 9.51 | 32.24 |
+| Median ITL (ms) | **9.25** | 9.51 | 20.65 |
+| P99 ITL (ms) | **16.10** | 10.33 | 173.89 |
 
-vLLM achieved approximately 0.97% higher output throughput and 2.45% lower mean TPOT. TensorRT-LLM recorded approximately 9 ms lower mean TTFT.
+_Throughput is measured in generated output tokens per second. Latency values are in milliseconds. Bold indicates the best measured value for each metric._
 
-The results indicate that, for Qwen2.5-1.5B-Instruct under this specific workload, neither engine demonstrates a substantial performance advantage.
+### Performance Summary
 
-These findings establish an empirical baseline for further inference optimization experiments.
+The three inference engines demonstrated different performance characteristics under the tested workload.
+
+**SGLang**
+
+- Highest steady-state output throughput at 959.03 tok/s.
+- Approximately 20.7% higher output throughput than vLLM.
+- Substantially lower mean TTFT at 144.24 ms.
+- Higher decode latency, with mean TPOT of 32.24 ms.
+- High GPU memory consumption, reaching 16,008 MiB during monitoring.
+
+**vLLM**
+
+- Output throughput of 796.39 tok/s.
+- Lowest mean TPOT at 9.28 ms.
+- Lowest median and P99 TPOT among the three engines.
+- Relatively consistent steady-state performance across Runs 2–4.
+
+**TensorRT-LLM**
+
+- Output throughput of 788.74 tok/s.
+- Mean TTFT of 3880.65 ms.
+- Mean TPOT of 9.51 ms.
+- Performance very similar to vLLM under the tested configuration.
+
+### Key Findings
+
+1. SGLang achieved the highest aggregate output throughput and lowest measured TTFT.
+2. vLLM achieved the lowest decode latency.
+3. TensorRT-LLM delivered performance close to vLLM, without a substantial throughput advantage.
+4. SGLang showed a different balance between prefill/first-token latency and decode latency.
+5. GPU memory consumption is an important constraint, particularly for SGLang on the RTX 5060 Ti 16GB.
+
+**Overall conclusion:** No single engine is best across every performance metric. SGLang leads in aggregate throughput and TTFT, while vLLM leads in decode latency. TensorRT-LLM performs similarly to vLLM in this particular experiment.
+
+These results represent measured performance for the tested configurations and should not be interpreted as a universal ranking of inference engines.
 
 ## Benchmark Methodology
 
-Both engines were evaluated using:
+All three engines were evaluated using:
 
 - Identical model architecture and model weights.
 - Fixed input and output token lengths.
-- Consistent request counts and request rates.
-- The same benchmark client and measurement methodology.
-- Four independent benchmark executions per engine.
-- Comparable GPU hardware constraints.
-
-Results are compared using latency, throughput, concurrency and GPU resource measurements.
+- Consistent request counts and configured request rates.
+- The same benchmark client (`vllm bench serve`).
+- OpenAI-compatible serving endpoints.
+- Four benchmark executions per engine.
+- Runs 2–4 for steady-state performance comparisons.
+- Run 1 retained as the initial warm-up execution.
+- GPU utilization and memory observations where available.
 
 The benchmark uses synthetic random prompts. Results should therefore be interpreted as controlled systems-performance measurements rather than representative measurements of every production workload.
+
+Engine-specific configurations are retained and documented rather than forcing identical internal settings across different serving frameworks.
 
 ## Project Objectives
 
 1. Establish reproducible LLM inference benchmarks.
-2. Evaluate vLLM and TensorRT-LLM performance.
+2. Evaluate vLLM, TensorRT-LLM and SGLang performance.
 3. Understand prefill and decode performance characteristics.
 4. Investigate GPU memory utilization and scheduling behavior.
-5. Identify performance trade-offs under controlled request workloads.
+5. Compare attention backends and KV-cache management.
+6. Identify performance trade-offs under controlled request workloads.
+7. Evaluate inference optimization opportunities on consumer NVIDIA GPU hardware.
 
-## Scope
+## Scope and Limitations
 
 This repository focuses exclusively on LLM inference serving and performance benchmarking.
 
-It does not evaluate model accuracy, clinical applications or medical AI workflows.
+Current experimental scope:
+
+- Single GPU: NVIDIA RTX 5060 Ti 16GB.
+- Single model: Qwen2.5-1.5B-Instruct.
+- Synthetic random workload.
+- Fixed input and output token lengths.
+- Configured request rate of 5 RPS.
+- Four executions per engine.
+- Sequential benchmark executions.
+- No randomized or paired execution order.
+- Engine-specific serving configurations.
+- GPU resource observations captured during selected runs.
+
+The benchmark does not evaluate model accuracy, training performance or production workload generalization.
+
+Results are specific to the tested hardware, software versions, model configuration and workload. Additional experiments are required to evaluate other models, GPUs, context lengths, concurrency levels and serving configurations.
 
 The goal is reproducible systems engineering experimentation supported by actual measurements rather than theoretical performance claims.
-
