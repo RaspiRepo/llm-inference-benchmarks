@@ -314,17 +314,3 @@ The results provide an empirical baseline for subsequent optimization and compar
 - Results are specific to the tested software versions and configurations.
 
 These results should not be generalized to other models, GPUs, workloads or TensorRT-LLM backends without further evaluation.
-
-Suggested repository structure:
-
-text
-
-```text
-Case-Study-1-LLM-Performance/
-├── README.md
-├── RUNBOOK.md
-├── 01-vllm-baseline.md
-└── 02-tensorrt-llm.md
-```
-
-This keeps the repository compact: one overview, one execution guide, and one complete report per inference engine. No additional comparison file is necessary because the comparison already lives at the top of the TensorRT-LLM report.
