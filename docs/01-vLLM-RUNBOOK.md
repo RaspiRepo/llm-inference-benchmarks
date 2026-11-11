@@ -1,36 +1,65 @@
-# Benchmark Runbook
+# vLLM Benchmark Runbook (SM120 / Blackwell)
 
-Instructions for deploying inference servers and running standardized LLM serving benchmarks.
+**Experiments:** EXP-001, Investigation 01 & Investigation 02  
+**Model:** `Qwen/Qwen2.5-1.5B-Instruct`  
+**Hardware:** NVIDIA GeForce RTX 5060 Ti 16GB (SM120)  
+**Serving Runtime:** Custom SM120 vLLM (`v0.33.0rc1.dev321` + `vllm-rs` Rust Frontend)  
+**Benchmark Client:** vLLM `bench serve`  
 
-## 1 Environment Preparation
+---
 
-Activate the project Python environment:
+## 1. Objective
 
-bash
+Establish reproducible vLLM performance baselines, high-concurrency saturation metrics, and control-plane profiles on NVIDIA Blackwell (SM120) hardware.
+
+The runbook covers:
+- **Phase 1 (Legacy Python Baseline):** Steady-state `5 RPS` workload (`--max-num-seqs 8` and `48`).
+- **Phase 2 (`vllm-rs` High-Concurrency Saturation):** Native Rust HTTP/Tokenizer frontend (`VLLM_USE_RUST_FRONTEND=1`) + CUDA Graphs under infinite burst (`--request-rate inf`).
+- **Control-Plane Isolation:** Dummy weight profiling (`--load-format dummy`) to isolate CPU orchestration overhead.
+
+---
+
+## 2. Environment & Rust Frontend Compilation
+
+Activate the project virtual environment and verify hardware/build versions:
 
 ```bash
 source .venv/bin/activate
-```
-
-Verify GPU availability:
-
-bash
-
-```bash
 nvidia-smi
-```
-
-Verify vLLM:
-
-bash
-
-```bash
 vllm --version
 ```
 
-## 2 Start vLLM Server
+### Build the Native Rust Frontend (`vllm-rs`)
+Before using `VLLM_USE_RUST_FRONTEND=1`, ensure the standalone Rust workspace binary (`vllm/vllm-rs`) is compiled in release mode from the vLLM source directory:
 
-bash
+```bash
+python tools/build_rust.py --release
+```
+
+*Verification:* When `VLLM_USE_RUST_FRONTEND=1` is active, startup logs will display `(RustFrontend pid=XXXX) INFO ... [server/src/lib.rs:345] OpenAI server is ready` instead of Python FastAPI route listings.
+
+---
+
+## 3. Configuration Parameters
+
+| Parameter | Value | Purpose |
+| --- | --- | --- |
+| `VLLM_USE_RUST_FRONTEND` | `1` (Recommended) | Replaces Python FastAPI & `hf.py` tokenizer with compiled Rust (`Axum` + `vllm-text`) |
+| `--max-model-len` | `2048` | Sets maximum context window length |
+| `--max-num-seqs` | `8` (Legacy) / `48`–`64` (Low Latency) / `128` (Peak Throughput) | Controls active concurrent sequences in the scheduler |
+| `--max-num-batched-tokens` | `2048` (`4096` for `Seq 128`) | Sets per-iteration token budget |
+| `--gpu-memory-utilization` | `0.90` | Allocates 90% of 16GB VRAM (~15.7 GiB peak usage; leaves ~600 MiB headroom) |
+| `--attention-backend` | `TRITON_ATTN` | Selects Triton attention kernels for SM120 compatibility |
+| `--no-enforce-eager` | Enabled (Default) | Enforces CUDA Graph capture to eliminate PyTorch/LibTorch launch overhead |
+| `--load-format` | `auto` (Default) / `dummy` (Starvation) | Optional flag to bypass GPU math and isolate CPU scheduler limits |
+
+---
+
+## 4. Start vLLM Server
+
+Keep the server running in **Terminal 1**.
+
+### 4.1 Phase 1: Legacy Python Baseline (`EXP-001`)
 
 ```bash
 vllm serve Qwen/Qwen2.5-1.5B-Instruct \
@@ -42,23 +71,47 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct \
     --port 8000
 ```
 
-Keep the server running in Terminal 1.
-
-## 3 Verify API Availability
-
-In Terminal 2:
-
-bash
+### 4.2 Phase 2: Production `vllm-rs` + CUDA Graphs (Recommended)
+Use `--max-num-seqs 48` or `64` for latency-sensitive chat SLOs (`TPOT ~21–23 ms`), or `128` (`--max-num-batched-tokens 4096`) for peak offline throughput (`2,188.46 tok/s`):
 
 ```bash
-curl http://localhost:8000/v1/models
+VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen2.5-1.5B-Instruct \
+    --max-model-len 2048 \
+    --max-num-seqs 128 \
+    --max-num-batched-tokens 4096 \
+    --gpu-memory-utilization 0.90 \
+    --attention-backend TRITON_ATTN \
+    --mm-encoder-attn-backend TRITON_ATTN \
+    --no-enforce-eager \
+    --port 8000
 ```
 
-Verify inference:
-
-bash
+### 4.3 Control-Plane Starvation Mode (CPU Isolation)
+Add `--load-format dummy` to skip real matrix math and measure pure CPU scheduler/IPC limits:
 
 ```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen2.5-1.5B-Instruct \
+    --max-model-len 2048 \
+    --max-num-seqs 64 \
+    --max-num-batched-tokens 2048 \
+    --gpu-memory-utilization 0.90 \
+    --attention-backend TRITON_ATTN \
+    --mm-encoder-attn-backend TRITON_ATTN \
+    --load-format dummy \
+    --no-enforce-eager \
+    --port 8000
+```
+
+---
+
+## 5. Verify API Availability & Warm-Up
+
+In **Terminal 2**, verify health and run a single warm-up request (excluded from measured runs) so CUDA Graph capture and kernel compilation settle:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/v1/models
+
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -70,11 +123,11 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
-Do not start benchmarking until the API responds successfully.
+---
 
-## 4 Run vLLM Serving Benchmark
+## 6. Run Serving Benchmark
 
-bash
+### 6.1 Steady-State Workload (`5 RPS`)
 
 ```bash
 vllm bench serve \
@@ -89,34 +142,7 @@ vllm bench serve \
     --label results_vllm_qwen
 ```
 
-## 5 TensorRT-LLM Server
-
-Start the TensorRT-LLM server using the corresponding model and configuration.
-
-Example deployment command:
-
-bash
-
-```bash
-trtllm-serve Qwen/Qwen2.5-1.5B-Instruct \
-    --config /opt/triton_models/config.yml
-```
-
-The actual command and configuration must be validated against the installed TensorRT-LLM version and deployment environment.
-
-Verify the API before benchmarking:
-
-bash
-
-```bash
-curl http://localhost:8000/v1/models
-```
-
-## 6 Benchmark TensorRT-LLM
-
-Use the same benchmark client and workload:
-
-bash
+### 6.2 High-Concurrency Burst Workload (`inf RPS`)
 
 ```bash
 vllm bench serve \
@@ -127,33 +153,25 @@ vllm bench serve \
     --input-len 1024 \
     --output-len 256 \
     --num-prompts 100 \
-    --request-rate 5 \
-    --label results_trtllm_qwen
+    --request-rate inf \
+    --label sm120_vllm_rs_inf
 ```
 
-Confirm that the TensorRT-LLM endpoint supports the required OpenAI-compatible API.
+---
 
-## 7 Experimental Controls
+## 7. GPU & CPU Flamegraph Monitoring
 
-For a fair comparison:
-
-- Use the same model weights.
-- Match model precision.
-- Match input and output token lengths.
-- Match request rate and prompt count.
-- Use equivalent GPU memory constraints where possible.
-- Run experiments independently.
-- Monitor GPU utilization and memory.
-- Record software versions and runtime configurations.
-
-Do not run both engines simultaneously on the same GPU for isolated performance comparisons.
-
-## 8. GPU Monitoring
-
-bash
+In **Terminal 3**, log GPU utilization, VRAM headroom, clocks, and power draw:
 
 ```bash
-watch -n 1 nvidia-smi
+nvidia-smi \
+  --query-gpu=utilization.gpu,utilization.memory,memory.used,power.draw,temperature.gpu \
+  --format=csv \
+  -l 1
 ```
 
-Capture GPU utilization, VRAM usage, temperature, and power during each experiment.
+To capture a mixed Python/C++ CPU flamegraph of the `EngineCore` process during active benchmarking:
+
+```bash
+sudo env "PATH=\$PATH" py-spy record -o frame-graph/vllm_sm120_profile.svg --pid <ENGINE_CORE_PID> --native --rate 100
+```

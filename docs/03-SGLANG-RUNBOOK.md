@@ -1,106 +1,77 @@
 # SGLang Benchmark Runbook
 
-**Experiment:** EXP-003\
-**Model:** Qwen2.5-1.5B-Instruct\
-**Hardware:** NVIDIA RTX 5060 Ti 16GB\
-**Serving runtime:** SGLang\
-**Deployment:** Docker\
-**Benchmark client:** vLLM `bench serve`
+**Experiments:** EXP-003-A through EXP-003-D  
+**Model:** Qwen2.5-1.5B-Instruct  
+**Hardware:** NVIDIA RTX 5060 Ti 16GB (SM120)  
+**Serving Runtime:** SGLang  
+**Deployment:** Docker  
+**Benchmark Client:** vLLM `bench serve`  
 
-## 1\. Objective
+---
 
-Establish an SGLang performance baseline using the same model and synthetic workload as EXP-001 (vLLM) and EXP-002 (TensorRT-LLM).
+## 1. Objective
 
-The experiment evaluates:
+Establish reproducible SGLang performance baselines and high-concurrency saturation limits using the same model and synthetic workload as vLLM and TensorRT-LLM.
 
-- Time to First Token (TTFT)
-- Time Per Output Token (TPOT)
-- Inter-token Latency (ITL)
-- Request throughput
-- Aggregate output token throughput
-- Peak request concurrency
-- Request success rate
+The runbook covers:
+- **Steady-State Baseline (`EXP-003-B`):** Controlled 5 RPS arrival rate (`--max-running-requests 8`).
+- **Control-Plane Starvation (`EXP-003-C`):** Dummy weights (`--load-format dummy`) under infinite burst (`--request-rate inf`).
+- **Real-Weight Saturation (`EXP-003-D`):** Full model weights under infinite burst at `--max-running-requests 64` and `128`.
 
-The SGLang results will be compared against the existing vLLM and TensorRT-LLM baselines.
+---
 
-## 2\. Deployment Environment
+## 2. Deployment Environment
 
 SGLang runs inside a Docker container on the Linux host.
 
 | Component | Configuration |
 | --- | --- |
-| GPU | NVIDIA RTX 5060 Ti |
-| GPU memory | 16 GB |
-| Deployment | Docker container |
-| Container name | sglang-bench-server |
-| Container image | lmsysorg/sglang:latest |
-| Inference engine | SGLang |
-| Model | Qwen2.5-1.5B-Instruct |
-| Model identifier | Qwen/Qwen2.5-1.5B-Instruct |
-| Model loading | Local Hugging Face snapshot |
-| Serving port | 30000 |
-| API | OpenAI-compatible REST API |
+| GPU | NVIDIA GeForce RTX 5060 Ti (SM120) |
+| GPU Memory | 16 GB |
+| Deployment | Docker container (`--ipc=host`, `--shm-size 32g`) |
+| Container Name | `sglang-bench-server` |
+| Container Image | `lmsysorg/sglang:latest` (`sha256:f832b5c39559c9caa900b22ad37c76fcce66470676855c42052102c537812f1f`) |
+| SGLang Version | `0.5.23` (PyTorch `2.14.1+cu130`) |
+| Model | `Qwen/Qwen2.5-1.5B-Instruct` (Local Hugging Face snapshot) |
+| Serving Port | `30000` (OpenAI-compatible REST API) |
 
-Verify the running container:
-
-bash
+Verify container status, GPU visibility, and exact package version:
 
 ```bash
 docker ps
-```
-
-Check GPU visibility inside the container:
-
-bash
-
-```bash
 docker exec -it sglang-bench-server nvidia-smi
+docker exec sglang-bench-server python3 -c "import sglang; print(sglang.__version__)"
 ```
 
-Inspect the container image and SGLang version:
+---
 
-bash
-
-```bash
-docker exec sglang-bench-server python3 -m sglang.version
-```
-
-If the version module is unavailable, inspect the installed package:
-
-bash
-
-```bash
-docker exec sglang-bench-server python3 -c \
-  "import sglang; print(sglang.__version__)"
-```
-
-Record the exact Docker image digest and SGLang version. The `latest` tag is mutable, so it should not be used as the only version identifier in the final report.
-
-
-### Configuration parameters
+## 3. Configuration Parameters
 
 | Parameter | Value | Purpose |
 | --- | --- | --- |
-| `--model-path` | Local model snapshot | Loads the existing Hugging Face model |
-| `--host` | `0.0.0.0` | Makes the API accessible outside the container |
-| `--port` | `30000` | API listening port |
+| `--model-path` | Local snapshot path | Loads the cached `Qwen2.5-1.5B-Instruct` weights |
+| `--host` / `--port` | `0.0.0.0` / `30000` | Exposes the OpenAI-compatible API outside the container |
 | `--trust-remote-code` | Enabled | Allows model-provided custom code |
-| `--kv-cache-dtype` | `fp8_e4m3` | Uses FP8 KV-cache storage |
-| `--mem-fraction-static` | `0.85` | Sets the static GPU memory allocation fraction |
-| `--attention-backend` | `flashinfer` | Selects the FlashInfer attention backend |
-| `--disable-radix-cache` | Enabled | Disables prefix KV-cache reuse |
+| `--context-length` | `2048` | Aligns context window with vLLM (`--max-model-len 2048`) |
+| `--max-running-requests` | `8` (Baseline) / `64` / `128` | Controls active sequence batch concurrency |
+| `--mem-fraction-static` | `0.85` (Baseline) / `0.90` (Saturation) | Sets static VRAM allocation fraction for KV cache |
+| `--attention-backend` | `flashinfer` | Selects SGLang's FlashInfer attention kernels |
+| `--disable-radix-cache` | Enabled | Prevents artificial prefix cache hits on random prompts |
+| `--load-format` | `auto` (Default) / `dummy` (Starvation) | Optional flag to skip matrix math and isolate CPU overhead |
 
-**Configuration note:** These are the actual initial settings used for this experiment. Validate their support against the installed SGLang version before changing them.
+*Note: Disabling RadixCache ensures an apples-to-apples comparison against vLLM on non-overlapping synthetic prompts, though it does not evaluate SGLang's prefix-sharing advantage.*
 
-The FP8 KV-cache setting is a configuration difference that must be documented when comparing engines. It does not necessarily imply that the model weights are FP8.
+---
 
-Disabling RadixCache also means this experiment does not evaluate SGLang's prefix-cache reuse advantage.
+## 4. Start SGLang Server
 
-## 4\. Start SGLang Server
+Always remove any prior container instance before launching a new configuration:
 
-The server is launched using Docker:
+```bash
+docker rm -f sglang-bench-server
+```
 
-bash
+### 4.1 Phase 1: Steady-State Baseline (`EXP-003-B`)
 
 ```bash
 HF_CACHE_DIR="/home/rtx5060/.cache/huggingface"
@@ -109,7 +80,7 @@ docker run -d --name sglang-bench-server \
   --gpus all \
   --shm-size 32g \
   -p 30000:30000 \
-  -v "$HF_CACHE_DIR:/root/.cache/huggingface" \
+  -v "\$HF_CACHE_DIR:/root/.cache/huggingface" \
   --ipc=host \
   lmsysorg/sglang:latest \
   python3 -m sglang.launch_server \
@@ -124,73 +95,48 @@ docker run -d --name sglang-bench-server \
     --disable-radix-cache
 ```
 
-Keep the container running during benchmarking.
+### 4.2 Phase 2: High-Concurrency Saturation (`EXP-003-D`)
 
-Check container status:
-
-bash
+Set `--max-running-requests` to `64` or `128` and `--mem-fraction-static 0.90` (add `--load-format dummy` for `EXP-003-C` control-plane starvation testing):
 
 ```bash
-docker ps -a --filter name=sglang-bench-server
+HF_CACHE_DIR="/home/rtx5060/.cache/huggingface"
+
+docker run -d --name sglang-bench-server \
+  --gpus all \
+  --shm-size 32g \
+  -p 30000:30000 \
+  -v "\$HF_CACHE_DIR:/root/.cache/huggingface" \
+  --ipc=host \
+  lmsysorg/sglang:latest \
+  python3 -m sglang.launch_server \
+    --model-path /root/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306 \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --trust-remote-code \
+    --context-length 2048 \
+    --max-running-requests 128 \
+    --mem-fraction-static 0.90 \
+    --attention-backend flashinfer \
+    --disable-radix-cache
 ```
 
-Inspect server logs:
-
-bash
+Monitor startup logs until the server reports it is ready to accept requests:
 
 ```bash
 docker logs -f sglang-bench-server
 ```
 
-Wait for model initialization and server startup to complete.
+---
 
-Do not start benchmarking if the container exits or the server reports attention-kernel, CUDA, model-loading, or GPU-memory errors.
+## 5. Verify API Availability & Warm-Up
 
-## 5\. Expose the API to the Benchmark Client
-
-Docker publishes container port 30000 on the host:
-
-bash
-
-```bash
--p 30000:30000
-```
-
-The benchmark endpoint is:
-
-text
-
-```text
-http://localhost:30000
-```
-
-No additional port forwarding is required when the benchmark client runs directly on the same host.
-
-If port 30000 is already occupied, change the host-side port mapping and update the benchmark URL accordingly.
-
-## 6\. Verify API Availability
-
-Check model availability:
-
-bash
-
-```bash
-curl http://localhost:30000/v1/models
-```
-
-Check server health:
-
-bash
+Verify health and execute a single warm-up generation request (excluded from measured runs) so initial kernel compilation completes:
 
 ```bash
 curl http://localhost:30000/health
-```
+curl http://localhost:30000/v1/models
 
-Send a test inference request:
-
-bash
-
-```bash
 curl http://localhost:30000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -205,25 +151,13 @@ curl http://localhost:30000/v1/chat/completions \
   }'
 ```
 
-Do not start benchmarking until the model endpoint responds successfully.
+---
 
-## 7\. Warm-up Procedure
+## 6. Run Serving Benchmark
 
-Execute a preliminary inference request before collecting benchmark results.
+Run from the host virtual environment using the standardized vLLM benchmark client:
 
-The warm-up request is not included in the measured benchmark.
-
-Apply the same warm-up policy used for vLLM and TensorRT-LLM.
-
-Allow model initialization and any initial kernel compilation to complete before proceeding.
-
-## 8\. Run Serving Benchmark
-
-Use the same benchmark client and workload as EXP-001 and EXP-002.
-
-Run from the host benchmark environment:
-
-bash
+### 6.1 Steady-State Workload (`5 RPS`)
 
 ```bash
 vllm bench serve \
@@ -238,16 +172,17 @@ vllm bench serve \
     --label results_sglang_qwen
 ```
 
-### Benchmark parameters
+### 6.2 High-Concurrency Burst Workload (`inf RPS`)
 
-| Parameter | Value |
-| --- | --- |
-| Dataset | Random synthetic |
-| Input length | 1024 tokens |
-| Output length | 256 tokens |
-| Number of requests | 100 |
-| Request rate | 5 RPS |
-| Backend | OpenAI-compatible |
-| Model | Qwen2.5-1.5B-Instruct |
-
-The benchmark client must be able to access the SGLang OpenAI-compatible endpoint.
+```bash
+vllm bench serve \
+    --backend openai \
+    --base-url http://localhost:30000 \
+    --model Qwen/Qwen2.5-1.5B-Instruct \
+    --dataset-name random \
+    --input-len 1024 \
+    --output-len 256 \
+    --num-prompts 100 \
+    --request-rate inf \
+    --label sm120_sglang_real_128
+```
